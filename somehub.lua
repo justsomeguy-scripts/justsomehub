@@ -122,10 +122,16 @@ local header = make("Frame", {
     BackgroundTransparency = 1, Active = true,
 }, window)
 make("TextLabel", {
-    Size = UDim2.fromOffset(120, 48), Position = UDim2.fromOffset(14, 0),
+    Size = UDim2.fromOffset(82, 48), Position = UDim2.fromOffset(14, 0),
     BackgroundTransparency = 1, Text = "COMBAT", Font = Enum.Font.GothamBold,
     TextSize = 15, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
 }, header)
+local minimize = make("TextButton", {
+    Size = UDim2.fromOffset(28, 28), Position = UDim2.fromOffset(100, 10),
+    BackgroundColor3 = C.control, Text = "−", Font = Enum.Font.GothamBold,
+    TextSize = 19, TextColor3 = C.text,
+}, header)
+round(minimize, 7)
 local close = make("TextButton", {
     Size = UDim2.fromOffset(28, 28), Position = UDim2.fromOffset(131, 10),
     BackgroundColor3 = C.control, Text = "×", Font = Enum.Font.GothamBold,
@@ -149,6 +155,16 @@ local pageHost = make("Frame", {
 }, window)
 round(pageHost, 10)
 local activePage, activeButton
+local minimized = false
+local function setMinimized(value)
+    minimized = value
+    rail.Visible = not value
+    pageHost.Visible = not value and activePage ~= nil
+    window.Size = UDim2.fromOffset(value and railWidth or (activePage and expandedWidth or railWidth),
+        value and 48 or windowHeight)
+    minimize.Text = value and "+" or "−"
+end
+connect(minimize.MouseButton1Click, function() setMinimized(not minimized) end)
 local function showPage(page, button)
     if activePage then activePage.Visible = false end
     if activeButton then activeButton.BackgroundColor3 = C.control; activeButton.TextColor3 = C.text end
@@ -209,19 +225,49 @@ local function folder(_parent, title, _initiallyOpen)
 end
 local controlUpdates = {}
 local controlCallbacks = {}
+local bindings, bindingUpdates = {}, {}
+local awaitingBind
+local function assignBind(field, code)
+    if code then
+        for other, bound in pairs(bindings) do
+            if other ~= field and bound == code then
+                bindings[other] = nil
+                if bindingUpdates[other] then bindingUpdates[other]() end
+            end
+        end
+    end
+    bindings[field] = code
+    if bindingUpdates[field] then bindingUpdates[field]() end
+end
 local function toggle(parent, label, field, callback)
-    local button = make("TextButton", {
-        Size = UDim2.new(1, 0, 0, 35), BackgroundColor3 = C.control,
-        Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = C.text,
-        TextXAlignment = Enum.TextXAlignment.Left,
+    local row = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 35), BackgroundTransparency = 1,
     }, parent)
+    local button = make("TextButton", {
+        Size = UDim2.new(1, -79, 1, 0), BackgroundColor3 = C.control,
+        Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, row)
     round(button, 6)
-    make("UIPadding", {PaddingLeft = UDim.new(0, 10)}, button)
+    make("UIPadding", {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 3)}, button)
+    local bindButton = make("TextButton", {
+        Size = UDim2.fromOffset(74, 35), Position = UDim2.new(1, -74, 0, 0),
+        BackgroundColor3 = C.control, Font = Enum.Font.GothamMedium,
+        TextSize = 11, TextColor3 = C.muted, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, row)
+    round(bindButton, 6)
+    local function updateBind()
+        bindButton.Text = awaitingBind == field and "Press key..."
+            or (bindings[field] and bindings[field].Name or "Bind key")
+        bindButton.TextColor3 = awaitingBind == field and C.accent or C.muted
+    end
+    bindingUpdates[field] = updateBind
     local function update()
-        button.Text = label .. (state[field] and "    [ON]" or "    [OFF]")
+        button.Text = label .. (state[field] and "  [ON]" or "  [OFF]")
         button.TextColor3 = state[field] and C.accent or C.text
     end
     update()
+    updateBind()
     controlUpdates[field] = update
     controlCallbacks[field] = callback
     connect(button.MouseButton1Click, function()
@@ -229,8 +275,39 @@ local function toggle(parent, label, field, callback)
         update()
         if callback then callback(state[field]) end
     end)
+    connect(bindButton.MouseButton1Click, function()
+        local previous = awaitingBind
+        awaitingBind = previous == field and nil or field
+        if previous and bindingUpdates[previous] then bindingUpdates[previous]() end
+        updateBind()
+    end)
     return update
 end
+connect(UserInputService.InputBegan, function(input, processed)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local code = input.KeyCode
+    if awaitingBind then
+        if code == Enum.KeyCode.Unknown then return end
+        local field = awaitingBind
+        awaitingBind = nil
+        if code == Enum.KeyCode.Escape or code == Enum.KeyCode.Backspace then
+            assignBind(field, nil)
+        else
+            assignBind(field, code)
+        end
+        return
+    end
+    if processed or UserInputService:GetFocusedTextBox() then return end
+    for field, bound in pairs(bindings) do
+        if bound == code then
+            state[field] = not state[field]
+            controlUpdates[field]()
+            local callback = controlCallbacks[field]
+            if callback then callback(state[field]) end
+            break
+        end
+    end
+end)
 local function slider(parent, label, field, low, high, decimals, unit)
     local box = make("Frame", {
         Size = UDim2.new(1, 0, 0, 58), BackgroundColor3 = C.control,
@@ -311,7 +388,7 @@ connect(aimPartButton.MouseButton1Click, function()
 end)
 toggle(aimFolder, "Magic lock (visual only)", "magic")
 make("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1,
+  Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1,
     Text = "Keeps your camera still; visual lock only. Does not spoof shots.",
     TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 11,
     TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left,
@@ -558,6 +635,20 @@ local function loadProfile(name)
             if colorUpdates[field] then colorUpdates[field]() end
         end
     end
+    -- Older profiles without bindings remain valid. Only known toggle fields and real keys load.
+    for field in pairs(bindingUpdates) do assignBind(field, nil) end
+    if type(profile.bindings) == "table" then
+        local fields = {}
+        for field in pairs(bindingUpdates) do table.insert(fields, field) end
+        table.sort(fields)
+        for _, field in ipairs(fields) do
+            local name = profile.bindings[field]
+            if type(name) == "string" then
+                local okKey, code = pcall(function() return Enum.KeyCode[name] end)
+                if okKey and code and code ~= Enum.KeyCode.Unknown then assignBind(field, code) end
+            end
+        end
+    end
     for field, update in pairs(controlUpdates) do update() end
     for field in pairs(changes) do
         local callback = controlCallbacks[field]
@@ -608,8 +699,10 @@ configButton("Save named config", function()
         colors[field] = {math.floor(color.R * 255 + 0.5), math.floor(color.G * 255 + 0.5),
             math.floor(color.B * 255 + 0.5)}
     end
+    local savedBindings = {}
+    for field, code in pairs(bindings) do savedBindings[field] = code.Name end
     local previousProfile, previousSelection = profiles[name], selected
-    profiles[name] = {state = values, colors = colors}
+    profiles[name] = {state = values, colors = colors, bindings = savedBindings}
     selected = name
     local ok, err = persistProfiles()
     if not ok then profiles[name], selected = previousProfile, previousSelection end
@@ -657,7 +750,7 @@ make("UIStroke", {Color = C.accent, Thickness = 2, Transparency = 0.15}, aimRing
 local function updateAimRing(camera)
     aimRing.Visible = state.aimRing
     if not state.aimRing then return end
-    local screen = camera.ViewportSize
+ local screen = camera.ViewportSize
     -- Project half the angular FOV onto the screen; cap angles beyond the viewport.
     local focalLength = screen.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2)))
     local radius = math.min(focalLength * math.tan(math.rad(math.min(state.aimFov / 2, 85))),
@@ -990,11 +1083,8 @@ RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 1, fu
                 warnedClick = true
                 warn("Triggerbot: this executor does not expose mouse1click; automatic firing is unavailable.")
             end
-        end
+		end
     else
         lastTarget = nil
     end
 end)
-
-      
-      
