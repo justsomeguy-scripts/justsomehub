@@ -31,7 +31,9 @@ local state = {
     espTracers = false, espHealth = false, espUser = false, espBox = false, espTeam = false,
     espVisibleBox = false,
     autoJump = false, accelerate = false, accelRate = 30, maxSpeed = 45,
-    walkOverride = false, walkSpeed = 16,
+    walkOverride = false, walkSpeed = 16, noclip = false,
+    infiniteJump = false, jumpPower = 50, jumpPowerOverride = false,
+    forceShiftlock = false,
 }
 local espColors = {
     tracers = Color3.fromRGB(100, 160, 255), health = Color3.fromRGB(80, 235, 125),
@@ -52,6 +54,46 @@ local function restoreMovement()
         movementHumanoid.WalkSpeed = originalWalkSpeed
     end
     movementHumanoid, originalWalkSpeed, currentSpeed, wasAirborne = nil, nil, nil, false
+end
+local noclipCharacter
+local originalCollisions = {}
+local function restoreNoclip()
+    for part, canCollide in pairs(originalCollisions) do
+        if part.Parent then part.CanCollide = canCollide end
+        originalCollisions[part] = nil
+    end
+    noclipCharacter = nil
+end
+local function updateNoclip()
+    local character = player.Character
+    if character ~= noclipCharacter then
+        restoreNoclip()
+        noclipCharacter = character
+    end
+    if not state.noclip or not character then return end
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if originalCollisions[part] == nil then originalCollisions[part] = part.CanCollide end
+            part.CanCollide = false
+        end
+    end
+end
+local jumpHumanoid, oldJumpPower, oldUseJumpPower
+local function restoreJumpPower()
+    if jumpHumanoid and jumpHumanoid.Parent then
+        jumpHumanoid.UseJumpPower = oldUseJumpPower
+        jumpHumanoid.JumpPower = oldJumpPower
+    end
+    jumpHumanoid, oldJumpPower, oldUseJumpPower = nil, nil, nil
+end
+local shiftHumanoid, oldCameraOffset, oldShiftAutoRotate, oldMouseBehavior
+local function restoreShiftlock()
+    if shiftHumanoid and shiftHumanoid.Parent then
+        shiftHumanoid.CameraOffset = oldCameraOffset
+        shiftHumanoid.AutoRotate = oldShiftAutoRotate
+    end
+    if oldMouseBehavior then UserInputService.MouseBehavior = oldMouseBehavior end
+    shiftHumanoid, oldCameraOffset, oldShiftAutoRotate, oldMouseBehavior = nil, nil, nil, nil
 end
 local lastTarget, targetSince, lastShot = nil, 0, 0
 local mouseHeld = false
@@ -102,6 +144,9 @@ local function cleanup()
     restoreFly()
     flyUp, flyDown = false, false
     restoreMovement()
+    restoreJumpPower()
+    restoreNoclip()
+    restoreShiftlock()
     restoreCameraMode()
     if stopSpectating then stopSpectating() end
     gui:Destroy()
@@ -333,7 +378,7 @@ connect(UserInputService.InputBegan, function(input, processed)
         end
     end
 end)
-local function slider(parent, label, field, low, high, decimals, unit)
+local function slider(parent, label, field, low, high, decimals, unit, onChange)
     local box = make("Frame", {
         Size = UDim2.new(1, 0, 0, 58), BackgroundColor3 = C.control,
     }, parent)
@@ -368,6 +413,7 @@ local function slider(parent, label, field, low, high, decimals, unit)
         local factor = 10 ^ decimals
         state[field] = math.floor((low + (high - low) * fraction) * factor + 0.5) / factor
         update()
+        if onChange then onChange(state[field]) end
     end
     connect(box.InputBegan, function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -516,7 +562,28 @@ colorPicker("Box color", "box")
 colorPicker("Visible box color", "visibleBox")
 
 local moveFolder = folder(body, "Movement", false)
+toggle(moveFolder, "Noclip", "noclip", function(enabled)
+    if not enabled then restoreNoclip() end
+end)
 toggle(moveFolder, "Autojump on landing", "autoJump")
+toggle(moveFolder, "Infinite jump", "infiniteJump")
+slider(moveFolder, "JumpPower", "jumpPower", 0, 250, 0, "", function()
+    state.jumpPowerOverride = true
+end)
+controlCallbacks.jumpPowerOverride = function(enabled)
+    if not enabled then restoreJumpPower() end
+end
+local lastInfiniteJump = 0
+connect(UserInputService.JumpRequest, function()
+    if not state.infiniteJump or state.fly or UserInputService:GetFocusedTextBox() then return end
+    local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    local now = os.clock()
+    if humanoid and humanoid.Health > 0 and now - lastInfiniteJump >= 0.12 then
+        lastInfiniteJump = now
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        humanoid.Jump = true
+    end
+end)
 toggle(moveFolder, "Acceleration", "accelerate", function(enabled)
     currentSpeed = nil
     if not enabled and not state.walkOverride then restoreMovement() end
@@ -735,6 +802,9 @@ local fileReady = type(readfile) == "function" and type(writefile) == "function"
     and type(isfolder) == "function" and type(makefolder) == "function"
 local profiles, selected, autoLoad = {}, nil, false
 local configFolder = folder(body, "Config", false)
+toggle(configFolder, "Force shift lock", "forceShiftlock", function(enabled)
+    if not enabled then restoreShiftlock() end
+end)
 local configName = make("TextBox", {
     Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.control,
     PlaceholderText = "Config name (letters, numbers, - or _)", Text = "",
@@ -801,6 +871,7 @@ local limits = {
     aimFov = {1, 360}, strength = {1, 100}, flySpeed = {5, 200},
     triggerFov = {1, 45}, mercy = {0, 2}, spinSpeed = {0, 10000},
     accelRate = {1, 200}, maxSpeed = {16, 200}, walkSpeed = {0, 200},
+    jumpPower = {0, 250},
 }
 local function loadProfile(name)
     local profile = profiles[name]
@@ -1118,7 +1189,18 @@ local function updateMovement(dt)
             currentSpeed = originalWalkSpeed
         end
     end
+    if humanoid ~= jumpHumanoid then
+        restoreJumpPower()
+        if humanoid and state.jumpPowerOverride then
+            jumpHumanoid = humanoid
+            oldJumpPower, oldUseJumpPower = humanoid.JumpPower, humanoid.UseJumpPower
+        end
+    end
     if not humanoid or humanoid.Health <= 0 then return end
+    if state.jumpPowerOverride then
+        if humanoid.UseJumpPower ~= true then humanoid.UseJumpPower = true end
+        if humanoid.JumpPower ~= state.jumpPower then humanoid.JumpPower = state.jumpPower end
+    end
     local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
     local landing = grounded and wasAirborne
     wasAirborne = not grounded
@@ -1217,7 +1299,9 @@ local warnedClick = false
 local warnedHold = false
 RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 1, function(dt)
     if not alive then return end
-    if state.autoJump or state.accelerate or state.walkOverride or movementHumanoid then
+    if state.noclip then updateNoclip() end
+    if state.autoJump or state.accelerate or state.walkOverride or state.jumpPowerOverride
+        or movementHumanoid or jumpHumanoid then
         updateMovement(dt)
     end
     local camera = workspace.CurrentCamera
@@ -1229,6 +1313,33 @@ RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 1, fu
     end
     updateAimRing(camera)
     updateFly()
+    if state.forceShiftlock then
+        local character = player.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if humanoid ~= shiftHumanoid then
+            restoreShiftlock()
+            if humanoid and root and humanoid.Health > 0 then
+                shiftHumanoid = humanoid
+                oldCameraOffset, oldShiftAutoRotate = humanoid.CameraOffset, humanoid.AutoRotate
+                oldMouseBehavior = UserInputService.MouseBehavior
+            end
+        end
+        if shiftHumanoid and root and humanoid.Health > 0 then
+            humanoid.CameraOffset = Vector3.new(1.75, 0, 0)
+            if UserInputService.MouseEnabled then
+                UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+            end
+            if not state.spin then
+                humanoid.AutoRotate = false
+                local direction = camera.CFrame.LookVector
+                local flat = Vector3.new(direction.X, 0, direction.Z)
+                if flat.Magnitude > 0.001 then
+                    root.CFrame = CFrame.lookAt(root.Position, root.Position + flat)
+                end
+            end
+        end
+    end
     if state.third then
         pcall(function()
             if player.CameraMode ~= Enum.CameraMode.Classic then player.CameraMode = Enum.CameraMode.Classic end
