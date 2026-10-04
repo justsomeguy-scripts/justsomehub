@@ -26,7 +26,7 @@ if not ok or not gui.Parent then gui.Parent = player:WaitForChild("PlayerGui") e
 local state = {
     aim = false, wall = true, team = true, aimFov = 35, aimRing = false, strength = 35, magic = false,
     aimPart = "Head", fly = false, flySpeed = 50,
-    trigger = false, triggerFov = 4, mercy = 0.15,
+    trigger = false, triggerHold = false, triggerFov = 4, mercy = 0.15,
     spin = false, spinSpeed = 360, third = false,
     espTracers = false, espHealth = false, espUser = false, espBox = false, espTeam = false,
     espVisibleBox = false,
@@ -54,7 +54,23 @@ local function restoreMovement()
     movementHumanoid, originalWalkSpeed, currentSpeed, wasAirborne = nil, nil, nil, false
 end
 local lastTarget, targetSince, lastShot = nil, 0, 0
+local mouseHeld = false
+local warnedRelease = false
+local function releaseTriggerMouse()
+    if not mouseHeld then return true end
+    local released, err = pcall(mouse1release)
+    if released then
+        mouseHeld = false
+        return true
+    end
+    if not warnedRelease then
+        warnedRelease = true
+        warn("Triggerbot: mouse1release failed:", err)
+    end
+    return false
+end
 local originalZoom, originalMax, originalMode
+local stopSpectating
 local spinHumanoid
 local oldAutoRotate
 local alive = true
@@ -79,6 +95,7 @@ end
 local function cleanup()
     if not alive then return end
     alive = false
+    releaseTriggerMouse()
     RunService:UnbindFromRenderStep(renderName)
     for _, connection in ipairs(connections) do connection:Disconnect() end
     restoreSpin()
@@ -86,6 +103,7 @@ local function cleanup()
     flyUp, flyDown = false, false
     restoreMovement()
     restoreCameraMode()
+    if stopSpectating then stopSpectating() end
     gui:Destroy()
     if _G[key] == cleanup then _G[key] = nil end
 end
@@ -226,6 +244,7 @@ end
 local controlUpdates = {}
 local controlCallbacks = {}
 local bindings, bindingUpdates = {}, {}
+local playerActions = {}
 local awaitingBind
 local function assignBind(field, code)
     if code then
@@ -300,10 +319,16 @@ connect(UserInputService.InputBegan, function(input, processed)
     if processed or UserInputService:GetFocusedTextBox() then return end
     for field, bound in pairs(bindings) do
         if bound == code then
-            state[field] = not state[field]
-            controlUpdates[field]()
-            local callback = controlCallbacks[field]
-            if callback then callback(state[field]) end
+            if field == "minimizeWindow" then
+                setMinimized(not minimized)
+            elseif playerActions[field] then
+                playerActions[field]()
+            elseif state[field] ~= nil then
+                state[field] = not state[field]
+                controlUpdates[field]()
+                local callback = controlCallbacks[field]
+                if callback then callback(state[field]) end
+            end
             break
         end
     end
@@ -412,13 +437,19 @@ end)
 local rageFolder = folder(body, "Ragemode", true)
 local triggerFolder = folder(rageFolder, "Triggerbot", false)
 toggle(triggerFolder, "Triggerbot", "trigger", function(enabled)
-    if not enabled then lastTarget = nil end
+    if not enabled then
+        lastTarget = nil
+        releaseTriggerMouse()
+    end
+end)
+toggle(triggerFolder, "Hold LMB instead of clicks", "triggerHold", function(enabled)
+    if not enabled then releaseTriggerMouse() end
 end)
 slider(triggerFolder, "Trigger FOV", "triggerFov", 1, 45, 0, "°")
 slider(triggerFolder, "Mercy time", "mercy", 0, 2, 2, "s")
 make("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 33), BackgroundTransparency = 1,
-    Text = "Mercy time = delay on the same target.\nFiring requires executor mouse1click().",
+    Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1,
+    Text = "Mercy time delays firing. Click mode needs mouse1click(); hold mode needs mouse1press() and mouse1release().",
     TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 11,
     TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left,
 }, triggerFolder)
@@ -534,6 +565,168 @@ make("TextLabel", {
     TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left,
 }, moveFolder)
 
+-- Live player list with per-player actions and independently assignable keybinds.
+local playersFolder = folder(body, "Players", false)
+local playerRows = {}
+local pendingPlayerBindings = {}
+local spectated, savedSubject, savedCameraType
+local function playerRoot(other)
+    local character = other.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    return root and root:IsA("BasePart") and root or nil
+end
+local function refreshSpectateButtons()
+    for other, row in pairs(playerRows) do
+        row.spectate.Text = other == spectated and "Spectate [ON]" or "Spectate [OFF]"
+        row.spectate.TextColor3 = other == spectated and C.accent or C.text
+    end
+end
+stopSpectating = function()
+    if not spectated then return end
+    spectated = nil
+    local camera = workspace.CurrentCamera
+    if camera then
+        local ownHumanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        camera.CameraSubject = savedSubject and savedSubject.Parent and savedSubject or ownHumanoid or camera.CameraSubject
+        camera.CameraType = savedCameraType or Enum.CameraType.Custom
+    end
+    savedSubject, savedCameraType = nil, nil
+    refreshSpectateButtons()
+end
+local function toggleSpectate(other)
+    if spectated == other then stopSpectating(); return end
+    if other.Parent ~= Players then return end
+    if not spectated then
+        local camera = workspace.CurrentCamera
+        savedSubject = camera and camera.CameraSubject or nil
+        savedCameraType = camera and camera.CameraType or nil
+    end
+    spectated = other
+    refreshSpectateButtons()
+end
+local function teleportTo(other)
+    if other.Parent ~= Players then return end
+    local character, root = player.Character, playerRoot(other)
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if character and playerRoot(player) and humanoid and humanoid.Health > 0 and root then
+        character:PivotTo(root.CFrame * CFrame.new(0, 0, 4))
+    end
+end
+local function playerActionButton(row, other, action, y, title, callback)
+    local field = "player" .. action .. ":" .. tostring(other.UserId)
+    local button = make("TextButton", {
+        Size = UDim2.new(1, -94, 0, 29), Position = UDim2.fromOffset(8, y),
+        BackgroundColor3 = C.panel, Text = title, Font = Enum.Font.GothamMedium,
+        TextSize = 12, TextColor3 = C.text,
+    }, row)
+    round(button, 5)
+    local bind = make("TextButton", {
+        Size = UDim2.fromOffset(78, 29), Position = UDim2.new(1, -86, 0, y),
+        BackgroundColor3 = C.panel, Font = Enum.Font.GothamMedium,
+        TextSize = 11, TextColor3 = C.muted, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, row)
+    round(bind, 5)
+    playerActions[field] = callback
+    bindingUpdates[field] = function()
+        bind.Text = awaitingBind == field and "Press key..."
+            or (bindings[field] and bindings[field].Name or "Bind key")
+    end
+    if pendingPlayerBindings[field] then
+        assignBind(field, pendingPlayerBindings[field])
+        pendingPlayerBindings[field] = nil
+    end
+    bindingUpdates[field]()
+    connect(button.MouseButton1Click, callback)
+    connect(bind.MouseButton1Click, function()
+        local previous = awaitingBind
+        awaitingBind = previous == field and nil or field
+        if previous and bindingUpdates[previous] then bindingUpdates[previous]() end
+        bindingUpdates[field]()
+    end)
+    return button
+end
+local function removePlayerRow(other)
+    local row = playerRows[other]
+    if not row then return end
+    if spectated == other then stopSpectating() end
+    for _, action in ipairs({"Teleport", "Spectate"}) do
+        local field = "player" .. action .. ":" .. tostring(other.UserId)
+        if awaitingBind == field then awaitingBind = nil end
+        bindings[field], bindingUpdates[field], playerActions[field] = nil, nil, nil
+    end
+    row.frame:Destroy()
+    playerRows[other] = nil
+end
+connect(Players.PlayerRemoving, removePlayerRow)
+local function updatePlayerList()
+    if not playersFolder.Visible then return end
+    local present = {}
+    local roster = Players:GetPlayers()
+    table.sort(roster, function(a, b) return a.Name:lower() < b.Name:lower() end)
+    local myRoot = playerRoot(player)
+    for index, other in ipairs(roster) do
+        present[other] = true
+        local row = playerRows[other]
+        if not row then
+            local frame = make("Frame", {
+                Size = UDim2.new(1, 0, 0, 114), BackgroundColor3 = C.control,
+            }, playersFolder)
+            round(frame, 6)
+            local info = make("TextLabel", {
+                Size = UDim2.new(1, -16, 0, 46), Position = UDim2.fromOffset(8, 2),
+                BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
+                TextSize = 12, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+                TextYAlignment = Enum.TextYAlignment.Center, TextWrapped = true,
+            }, frame)
+            local spectate = playerActionButton(frame, other, "Spectate", 80, "Spectate [OFF]", function()
+                toggleSpectate(other)
+            end)
+            playerActionButton(frame, other, "Teleport", 49, "Teleport to player", function()
+                teleportTo(other)
+            end)
+            row = {frame = frame, info = info, spectate = spectate}
+            playerRows[other] = row
+            refreshSpectateButtons()
+        end
+        row.frame.LayoutOrder = index
+        local character = other.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local root = playerRoot(other)
+        local health = humanoid and string.format("%.0f / %.0f", humanoid.Health, humanoid.MaxHealth) or "N/A"
+        local distance = myRoot and root and string.format("%.0f studs", (root.Position - myRoot.Position).Magnitude) or "N/A"
+        row.info.Text = string.format("%s  (@%s)\nHealth: %s   |   Distance: %s",
+            other.DisplayName, other.Name, health, distance)
+    end
+    for other in pairs(playerRows) do
+        if not present[other] then removePlayerRow(other) end
+    end
+end
+local playerListElapsed = 0
+connect(RunService.Heartbeat, function(dt)
+    if spectated then
+        if spectated.Parent ~= Players then
+            stopSpectating()
+        else
+            local camera = workspace.CurrentCamera
+            local character = spectated.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            if camera and humanoid and humanoid.Health > 0 then
+                camera.CameraType = Enum.CameraType.Custom
+                if camera.CameraSubject ~= humanoid then camera.CameraSubject = humanoid end
+            end
+        end
+    end
+    if not playersFolder.Visible then
+        playerListElapsed = 0
+        return
+    end
+    playerListElapsed = playerListElapsed + dt
+    if playerListElapsed >= 0.5 then
+        playerListElapsed = 0
+        updatePlayerList()
+    end
+end)
+
 -- Named profiles live in one JSON file per place. File APIs are executor-dependent.
 local HttpService = game:GetService("HttpService")
 local configDir = "BasaltCombatConfigs"
@@ -554,6 +747,23 @@ local configStatus = make("TextLabel", {
     TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 11,
     TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left,
 }, configFolder)
+local minimizeBindButton = make("TextButton", {
+    Size = UDim2.new(1, 0, 0, 35), BackgroundColor3 = C.control,
+    Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = C.text,
+}, configFolder)
+round(minimizeBindButton, 6)
+bindingUpdates.minimizeWindow = function()
+    minimizeBindButton.Text = "Minimize key: " .. (awaitingBind == "minimizeWindow" and "Press key..."
+        or (bindings.minimizeWindow and bindings.minimizeWindow.Name or "Bind key"))
+    minimizeBindButton.TextColor3 = awaitingBind == "minimizeWindow" and C.accent or C.text
+end
+bindingUpdates.minimizeWindow()
+connect(minimizeBindButton.MouseButton1Click, function()
+    local previous = awaitingBind
+    awaitingBind = previous == "minimizeWindow" and nil or "minimizeWindow"
+    if previous and bindingUpdates[previous] then bindingUpdates[previous]() end
+    bindingUpdates.minimizeWindow()
+end)
 local function configButton(label, callback)
     local button = make("TextButton", {
         Size = UDim2.new(1, 0, 0, 35), BackgroundColor3 = C.control,
@@ -1004,6 +1214,7 @@ local function closest(camera, fov, checkWalls)
     return chosen
 end
 local warnedClick = false
+local warnedHold = false
 RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 1, function(dt)
     if not alive then return end
     if state.autoJump or state.accelerate or state.walkOverride or movementHumanoid then
@@ -1012,6 +1223,8 @@ RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 1, fu
     local camera = workspace.CurrentCamera
     if not camera then
         aimRing.Visible = false
+        releaseTriggerMouse()
+        lastTarget = nil
         return
     end
     updateAimRing(camera)
